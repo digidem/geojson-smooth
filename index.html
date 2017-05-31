@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+body, html {
+  padding: 0;
+  margin: 0;
+  font: 13px sans-serif;
+}
+canvas {
+    border: 1px solid gray;
+}
+
+.drag {
+  outline: 3px solid red;
+}
+
+.ticks {
+  font: 10px sans-serif;
+}
+
+.track,
+.track-inset,
+.track-overlay {
+  stroke-linecap: round;
+}
+
+.track {
+  stroke: #000;
+  stroke-opacity: 0.3;
+  stroke-width: 10px;
+}
+
+.track-inset {
+  stroke: #ddd;
+  stroke-width: 8px;
+}
+
+.track-overlay {
+  pointer-events: stroke;
+  stroke-width: 50px;
+  stroke: transparent;
+  cursor: crosshair;
+}
+
+.handle {
+  fill: #fff;
+  stroke: #000;
+  stroke-opacity: 0.5;
+  stroke-width: 1.25px;
+  cursor: ew-resize;
+}
+</style>
+<body>
+<script src="https://d3js.org/d3.v4.min.js"></script>
+<script src="https://unpkg.com/topojson-server@3"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
+<script src="https://unpkg.com/topojson-simplify@3"></script>
+<script src="https://unpkg.com/drag-drop/dragdrop.min.js"></script>
+<script src="https://d3js.org/d3-geo-projection.v2.min.js"></script>
+<script src="https://npmcdn.com/@turf/turf/turf.min.js"></script>
+<script src="https://unpkg.com/file-saver/FileSaver.min.js"></script>
+<script src="lib/d3-geo.js"></script>
+<script src="lib/d3-geo-curve.js"></script>
+<script src="lib/d3-geojson-context.js"></script>
+<script>
+
+var dpr = window.devicePixelRatio,
+    width = 960,
+    height = 500,
+    scale,
+    outputScale = 1,
+    projection,
+    output,
+    minZ = 1,
+    alpha = 0.5,
+    showVertices = true,
+    curve = d3.geoCurveCatmullRom
+
+var curveOptions = [
+    {label: "Catmull Rom", value: d3.geoCurveCatmullRom},
+    {label: "Basis", value: d3.geoCurveBasis},
+    {label: "Cardinal", value: d3.geoCurveCardinal},
+    {label: "Linear", value: d3.geoCurveLinear}
+]
+
+var zoom = d3.zoom()
+    .scaleExtent([1, 100])
+    .on('zoom', zoomed)
+
+var div = d3.select("body").append("div")
+    .style("width", width + "px")
+    .style("height", height + "px")
+
+var canvas = div.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", width + "px")
+    .style("height", height + "px")
+
+var options = div.append("div")
+    .style("position", "absolute")
+    .style("top", "10px")
+    .style("left", "10px")
+
+var menu = options.append("select")
+    .on("change", changeCurve)
+
+menu.selectAll("option")
+    .data(curveOptions)
+    .enter().append("option")
+    .text(function(d) { return d.label })
+
+function changeCurve () {
+    curve = curveOptions[this.selectedIndex].value
+    if (typeof curve.alpha === "function") curve = curve.alpha(alpha)
+    if (typeof curve.tension === "function") curve = curve.tension(alpha)
+    path.curve(curve)
+    renderGeoJSON()
+    render()
+}
+
+var checkbox = options.append("div")
+    .style("margin-top", "5px")
+
+checkbox.append("input")
+    .attr("type", "checkbox")
+    .attr("id", "showVertices")
+    .attr("checked", showVertices)
+    .on("change", toggleVertices)
+
+checkbox.append("label")
+    .attr("for", "showVertices")
+    .text("Show vertices")
+
+function toggleVertices () {
+    showVertices = this.checked
+    render()
+}
+
+var saveButton = d3.select("body")
+    .append("div")
+    .style("margin", "10px")
+    .append("button")
+    .attr("type", "button")
+    .on("click", save)
+    .text("Save smoothed GeoJSON")
+
+function save () {
+    const file = new Blob([JSON.stringify(output, null, 2)], {type: "text/plain;charset=utf-8"})
+    saveAs(file, "smoothed.geojson")
+}
+
+var context = canvas.node().getContext("2d")
+
+context.lineJoin = "round"
+context.lineCap = "round"
+context.lineWidth = 1 / dpr
+
+var transform = d3.geoIdentity()
+var simplify = d3.geoTransform({point: function (x, y, z) {
+    if (z >= minZ) this.stream.point(x, y, z)
+}})
+
+var path = d3.geoPath()
+    .projection(simplify)
+    .curve(d3.geoCurveCatmullRom.alpha(alpha))
+
+var preview = d3.geoPath()
+    .projection(transform)
+    .context(context)
+
+var preview2 = d3.geoPath()
+    .projection({stream: function(s) { return simplify.stream(transform.stream(s)) }})
+    .context(context)
+
+var vertices = d3.geoPath()
+    .pointRadius(2 / dpr)
+    .projection({stream: function(s) { return simplify.stream(transform.stream(s)) }})
+    .context(context)
+
+var render = function () {}
+var renderGeoJSON = function () {}
+
+d3.json('norway.geojson', onLoad)
+
+DragDrop(div.node(), function (files) {
+  readAsJson(files[0], onLoad)
+})
+
+function onLoad (err, geojson) {
+    if (err) throw err
+
+    transform
+        .translate([0, 0])
+        .scale(1)
+
+    projection = d3.geoMercator()
+        .fitSize([width * dpr, height * dpr], geojson)
+
+    scale = projection.scale()
+
+    var geojsonProj = d3.geoProject(geojson, projection)
+
+    var topo = topojson.presimplify(topojson.topology({geojson: geojsonProj}, 1e4))
+    var simplified = topojson.feature(topo, topo.objects.geojson)
+
+    var points = turf.coordReduce(simplified, function (m, coords) {
+        m.geometries.push({type: "Point", coordinates: coords})
+        return m
+    }, {type: "GeometryCollection", geometries: []}, true)
+
+    render = function() {
+        context.fillStyle = "#fff", context.fillRect(0, 0, width * dpr, height * dpr)
+        // context.beginPath(), preview2.curve(path.curve())(simplified), context.strokeStyle = "#00f", context.stroke()
+        context.beginPath(), preview(output), context.strokeStyle = "#000", context.stroke()
+        if (!showVertices) return
+        context.beginPath(), vertices(points), context.fillStyle = "#000", context.stroke()
+    }
+
+    renderGeoJSON = function() {
+        var context = d3.geoJSONContext(outputScale)
+        path.context(context)(simplified)
+        output = context.result()
+    }
+
+    canvas.call(zoom)
+    canvas.call(zoom.transform, d3.zoomIdentity)
+    renderGeoJSON()
+    render()
+}
+
+function zoomed () {
+    var t = d3.event.transform
+    transform
+        .translate([t.x * dpr, t.y * dpr])
+        .scale(t.k)
+    render()
+}
+
+function readAsJson (file, cb) {
+  var reader = new FileReader()
+  reader.addEventListener('load', function (e) {
+    try {
+      cb(null, JSON.parse(e.target.result))
+    } catch (err) {
+      cb(err)
+    }
+  })
+  reader.addEventListener('err', cb)
+  reader.readAsText(file)
+}
+
+</script>
+<script src="simplify-slider.js"></script>
+<script src="alpha-slider.js"></script>
+<script src="output-scale-slider.js"></script>
+</body>
